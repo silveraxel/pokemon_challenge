@@ -214,17 +214,23 @@ def battle_to_full_features(battle, max_turns=30):
 # ============================================================================
 
 class BattleDataset(Dataset):
-    def __init__(self, features, labels=None):
+    def __init__(self, features, labels=None,training=False, noise_std=0.01):
         self.X = torch.FloatTensor(features)
         self.y = torch.LongTensor(labels) if labels is not None else None
-    
+        self.training = training
+        self.noise_std = noise_std
     def __len__(self):
         return len(self.X)
     
     def __getitem__(self, idx):
+        # Add noise during training only
+        x = self.X[idx]
+        if self.training and self.noise_std > 0:
+            noise = torch.randn_like(x) * (torch.abs(x) * self.noise_std + 1e-6)  # Add small epsilon
+            x = x + noise
         if self.y is not None:
-            return self.X[idx], self.y[idx]
-        return self.X[idx]
+            return x, self.y[idx]
+        return x
 
 
 class SimpleClassifier(nn.Module):
@@ -232,25 +238,20 @@ class SimpleClassifier(nn.Module):
         super(SimpleClassifier, self).__init__()
 
         self.classifier = nn.Sequential(
-            nn.Linear(input_dim, 512),   # Direct from input
-            nn.BatchNorm1d(512),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            
-            nn.Linear(512, 256),
+            nn.Linear(input_dim, 256),   # Direct from input
             nn.BatchNorm1d(256),
             nn.ReLU(),
-            nn.Dropout(0.1),
+            nn.Dropout(0.5),
             
             nn.Linear(256, 128),
             nn.BatchNorm1d(128),
             nn.ReLU(),
-            nn.Dropout(0.1),
+            nn.Dropout(0.5),
             
             nn.Linear(128, 64),
             nn.BatchNorm1d(64),
             nn.ReLU(),
-            nn.Dropout(0.1),
+            nn.Dropout(0.5),
             
             nn.Linear(64, 2)  # Output 2 classes
         )
@@ -267,8 +268,8 @@ class SimpleClassifier(nn.Module):
 
 def train_model(model, train_loader, val_loader, epochs):
     
-    criterion_class = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=1e-4)
+    criterion_class = nn.CrossEntropyLoss(label_smoothing=0.2)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=1e-3)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, 
         mode='max',           # 'max' because we want to maximize accuracy
@@ -285,7 +286,8 @@ def train_model(model, train_loader, val_loader, epochs):
         model.train()
         train_loss_class = 0
         train_loss_total = 0
-        
+        total = 0
+        correct = 0
         for X_batch, y_batch in train_loader:
             X_batch, y_batch = X_batch.to(device), y_batch.to(device)
             
@@ -293,9 +295,13 @@ def train_model(model, train_loader, val_loader, epochs):
             
             # Forward pass - get both reconstruction and classification
             classification = model(X_batch)
-            
+
             # Compute both losses
             loss_class = criterion_class(classification, y_batch)
+
+            _, predicted = torch.max(classification, 1)
+            total += y_batch.size(0)
+            correct += (predicted == y_batch).sum().item()
             
             # Combined loss
             loss = loss_class
@@ -304,12 +310,11 @@ def train_model(model, train_loader, val_loader, epochs):
             optimizer.step()
             train_loss_class += loss.item()
             train_loss_total = train_loss_class
-        
+        train__acc = 100 * correct / total
         # Validate
         model.eval()
         correct = 0
         total = 0
-        val_loss_recon = 0
         val_loss_class = 0
         with torch.no_grad():
             for X_batch, y_batch in val_loader:
@@ -320,35 +325,30 @@ def train_model(model, train_loader, val_loader, epochs):
                 # Compute validation losses
                 val_loss_class += criterion_class(classification, y_batch).item()
                 
-                # Compute accuracy
+                # Compute validation accuracy
                 _, predicted = torch.max(classification, 1)
                 total += y_batch.size(0)
                 correct += (predicted == y_batch).sum().item()
         
-        acc = 100 * correct / total
-        scheduler.step(acc) 
+        val_acc = 100 * correct / total
+        scheduler.step(val_acc) 
         # Save best model based on accuracy
-        #if acc > best_acc:
-        #    best_acc = acc
-        #    torch.save(model.state_dict(), './advanced_model.pth')
+        if val_acc > best_acc:
+            best_acc = val_acc
+            torch.save(model.state_dict(), './advanced_model.pth')
         
-        # Print progress
-        train_loss_recon=0
-        val_loss_recon = 0
-        print(train_loss_class)
-        print(train_loss_total)
+
         if (epoch + 1) % 5 == 0:
             print(f'Epoch {epoch+1}/{epochs}')
             print(f'  Train - Total: {train_loss_total/len(train_loader):.4f} | '
-                  f'Recon: {train_loss_recon/len(train_loader):.4f} | '
+                  f'Train Acc: {train__acc:.2f}%'
                   f'Class: {train_loss_class/len(train_loader):.4f}')
-            print(f'  Val   - Recon: {val_loss_recon/len(val_loader):.4f} | '
-                  f'Class: {val_loss_class/len(val_loader):.4f} | '
-                  f'Acc: {acc:.2f}%')
+            print(f'  Val   - 'f'Class: {val_loss_class/len(val_loader):.4f} | '
+                  f'Val Acc: {val_acc:.2f}%')
     
     # Load best model
-    #model.load_state_dict(torch.load('./advanced_model.pth'))
-    #print(f'\nBest Validation Accuracy: {best_acc:.2f}%')
+    model.load_state_dict(torch.load('./advanced_model.pth'))
+    print(f'\nBest Validation Accuracy: {best_acc:.2f}%')
     return model
 
 
@@ -377,7 +377,7 @@ X_train = np.array([battle_to_full_features(b) for b in train_battles])
 y_train = np.array([int(b['player_won']) for b in train_battles])
     
     
-X_test = np.array([battle_to_full_features(b) for b in test_battles])
+X_competition = np.array([battle_to_full_features(b) for b in test_battles])
 #Test data doesnt have label?
 #y_test = np.array([int(b['player_won']) for b in test_battles])
 test_ids = [b['battle_id'] for b in test_battles]
@@ -385,34 +385,36 @@ test_ids = [b['battle_id'] for b in test_battles]
 
 
 # Split
-X_train,X_test, y_train, y_test = train_test_split(X_train, y_train, test_size=0.5, random_state=42)
-X_val,X_test, y_val, y_test = train_test_split(X_test, y_test, test_size=0.5, random_state=42)
+X_train,X_test, y_train, y_test = train_test_split(X_train, y_train, test_size=0.8)
+X_val,X_test, y_val, y_test = train_test_split(X_test, y_test, test_size=0.8)
 
 #Normalize using only training statistics
 X_train = scaler.fit_transform(X_train)
 X_val = scaler.transform(X_val)
 X_test = scaler.transform(X_test)
-
+X_competition = scaler.transform(X_competition)
    
 # Create dataloaders
-train_loader = DataLoader(BattleDataset(X_train, y_train), batch_size=16, shuffle=True)
-val_loader = DataLoader(BattleDataset(X_val, y_val), batch_size=16)
-test_loader = DataLoader(BattleDataset(X_test, y_test), batch_size=16)
-    
+train_loader = DataLoader(BattleDataset(X_train, y_train,training=True, noise_std=0.05), batch_size=32, shuffle=True)
+val_loader = DataLoader(BattleDataset(X_val, y_val,training=False), batch_size=32)
+test_loader = DataLoader(BattleDataset(X_test, y_test,training=False), batch_size=32)
+competition_loader = DataLoader(BattleDataset(X_competition,training=False), batch_size=32)
 # Train
 print("Training Advanced Encoder-Decoder with RAW timeline data...")
 print("Architecture: Input(1242) → Encoder(256→128→96) → Decoder(32→2)\n")
         
 input_dim = X_train.shape[1]
-epochs = 400
+epochs = 500
     
 model = SimpleClassifier(input_dim=input_dim).to(device)
 model = train_model(model, train_loader, val_loader, epochs)
 
 
 # Predict
-print("\nGenerating predictions...")
+""""
+print("\nGenerating predictions for testing...")
 model.eval()
+
 predictions = []
 accuracy = 0
 i=0
@@ -432,10 +434,21 @@ with torch.no_grad():
 
 print('mean testing accuracy = ' + str(accuracy/i))
 """
+
+# Predict for the competition
+print("\nGenerating predictions for the competition...")
+model.eval()
+predictions = []
+with torch.no_grad():
+    for test_batch in competition_loader:
+        outputs = model.forward(test_batch.to(device))
+        preds = torch.max(outputs, 1)
+        predictions.extend(preds[1].cpu().numpy())
+
+
 # Save
 submission = pd.DataFrame({
     'battle_id': test_ids,
     'player_won': predictions
 })
 submission.to_csv('./submission.csv', index=False)
-"""
