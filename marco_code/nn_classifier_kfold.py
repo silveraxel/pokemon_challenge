@@ -214,7 +214,7 @@ def battle_to_full_features(battle, max_turns=30):
 # ============================================================================
 
 class BattleDataset(Dataset):
-    def __init__(self, features, labels=None,training=False, noise_std=0.01):
+    def __init__(self, features, labels=None,training=False, noise_std=0.001):
         self.X = torch.FloatTensor(features)
         self.y = torch.LongTensor(labels) if labels is not None else None
         self.training = training
@@ -268,8 +268,8 @@ class SimpleClassifier(nn.Module):
 
 def train_model(model, train_loader, val_loader, epochs):
     
-    criterion_class = nn.CrossEntropyLoss(label_smoothing=0.2)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-3)
+    criterion_class = nn.CrossEntropyLoss(label_smoothing=0.01)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=1e-3)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, 
         mode='max',           # 'max' because we want to maximize accuracy
@@ -279,8 +279,11 @@ def train_model(model, train_loader, val_loader, epochs):
         min_lr=1e-6          # Don't go below this LR
     )    
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    best_acc = 0
-    
+    #best_acc = 0
+    try:
+        model.load_state_dict(torch.load('./advanced_model.pth'))
+    except:
+        print('Not available model to be loaded.')
     for epoch in range(epochs):
         # Train
         model.train()
@@ -309,7 +312,6 @@ def train_model(model, train_loader, val_loader, epochs):
             loss.backward()
             optimizer.step()
             train_loss_class += loss.item()
-            train_loss_total = train_loss_class
         train__acc = 100 * correct / total
         # Validate
         model.eval()
@@ -333,22 +335,23 @@ def train_model(model, train_loader, val_loader, epochs):
         val_acc = 100 * correct / total
         scheduler.step(val_acc) 
         # Save best model based on accuracy
-        if val_acc > best_acc:
-            best_acc = val_acc
-            torch.save(model.state_dict(), './advanced_model.pth')
+        #if val_acc > best_acc:
+        #    best_acc = val_acc
+        #    torch.save(model.state_dict(), './advanced_model.pth')
         
 
         if (epoch + 1) % 5 == 0:
             print(f'Epoch {epoch+1}/{epochs}')
-            print(f'  Train - Total: {train_loss_total/len(train_loader):.4f} | '
-                  f'Train Acc: {train__acc:.2f}%'
-                  f'Class: {train_loss_class/len(train_loader):.4f}')
+            print(f'  Train - 'f'Class: {train_loss_class/len(train_loader):.4f} | '
+                  f'Train Acc: {train__acc:.2f}%')
             print(f'  Val   - 'f'Class: {val_loss_class/len(val_loader):.4f} | '
                   f'Val Acc: {val_acc:.2f}%')
     
+    torch.save(model.state_dict(), './advanced_model.pth')
+    
     # Load best model
-    model.load_state_dict(torch.load('./advanced_model.pth'))
-    print(f'\nBest Validation Accuracy: {best_acc:.2f}%')
+    #model.load_state_dict(torch.load('./advanced_model.pth'))
+    #print(f'\nBest Validation Accuracy: {best_acc:.2f}%')
     return model
 
 
@@ -372,42 +375,26 @@ with open(os.path.join(DATA_PATH, 'test.jsonl'), 'r') as f:
 print(f"Train: {len(train_battles)} | Test: {len(test_battles)}")
     
 
-scaler = StandardScaler()
-X_train = np.array([battle_to_full_features(b) for b in train_battles])
-y_train = np.array([int(b['player_won']) for b in train_battles])
-    
-    
-X_competition = np.array([battle_to_full_features(b) for b in test_battles])
-#Test data doesnt have label?
-#y_test = np.array([int(b['player_won']) for b in test_battles])
-test_ids = [b['battle_id'] for b in test_battles]
-    
-# Split
-X_train,X_test, y_train, y_test = train_test_split(X_train, y_train, test_size=0.5)
-X_val,X_test, y_val, y_test = train_test_split(X_test, y_test, test_size=0.5)
-
-#Normalize using only training statistics
-X_train = scaler.fit_transform(X_train)
-X_val = scaler.transform(X_val)
-X_test = scaler.transform(X_test)
-X_competition = scaler.transform(X_competition)
+kfold = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+scaler = StandardScaler() 
+X = np.array([battle_to_full_features(b) for b in train_battles])
+y = np.array([int(b['player_won']) for b in train_battles])
+input_dim = X.shape[1]
+epochs = 100
+for fold, (train_idx, val_idx) in enumerate(kfold.split(X, y)):
+    print('Starting training on new fold')
+    X_train_fold, X_val_fold = X[train_idx], X[val_idx]
+    y_train_fold, y_val_fold = y[train_idx], y[val_idx]
+    X_train_fold = scaler.fit_transform(X_train_fold)
+    X_val_fold = scaler.transform(X_val_fold)
    
 # Create dataloaders
-train_loader = DataLoader(BattleDataset(X_train, y_train,training=True, noise_std=0.05), batch_size=32, shuffle=True)
-val_loader = DataLoader(BattleDataset(X_val, y_val,training=False), batch_size=32)
-test_loader = DataLoader(BattleDataset(X_test, y_test,training=False), batch_size=32)
-competition_loader = DataLoader(BattleDataset(X_competition,training=False), batch_size=32)
-# Train
-print("Training Advanced Encoder-Decoder with RAW timeline data...")
-print("Architecture: Input(1242) → Encoder(256→128→96) → Decoder(32→2)\n")
-        
-input_dim = X_train.shape[1]
-epochs = 500
-    
-model = SimpleClassifier(input_dim=input_dim).to(device)
-model = train_model(model, train_loader, val_loader, epochs)
+    train_loader = DataLoader(BattleDataset(X_train_fold, y_train_fold,training=True, noise_std=0.1), batch_size=32, shuffle=True)
+    val_loader = DataLoader(BattleDataset(X_val_fold, y_val_fold,training=False), batch_size=32)
 
-
+    model = SimpleClassifier(input_dim=input_dim).to(device)
+    model = train_model(model, train_loader, val_loader, epochs)
+#After the k-fold cross validation save the model
 # Predict
 """"
 print("\nGenerating predictions for testing...")
@@ -432,6 +419,11 @@ with torch.no_grad():
 
 print('mean testing accuracy = ' + str(accuracy/i))
 """
+
+X_competition = np.array([battle_to_full_features(b) for b in test_battles])
+test_ids = [b['battle_id'] for b in test_battles]
+X_competition = scaler.transform(X_competition)
+competition_loader = DataLoader(BattleDataset(X_competition,training=False),batch_size=32)
 
 # Predict for the competition
 print("\nGenerating predictions for the competition...")
