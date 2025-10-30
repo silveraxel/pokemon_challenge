@@ -1,1 +1,3 @@
 /input
+*.pth
+.ipynb_checkpoints/

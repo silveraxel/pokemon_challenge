@@ -19,6 +19,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
 import os
 
 torch.manual_seed(42)
@@ -183,7 +184,7 @@ def extract_static_features(battle):
     return features
 
 
-def battle_to_full_features(battle, max_turns=50):
+def battle_to_full_features(battle, max_turns=30):
     """
     Combine static AND raw dynamic features
     
@@ -228,19 +229,22 @@ class BattleDataset(Dataset):
 
 class AdvancedEncoderDecoder(nn.Module):
     """
-    Enhanced encoder-decoder for static + raw dynamic features
+    Enhanced encoder-decoder with BOTH reconstruction and classification
     
-    Architecture: 1242 → 256 → 128 → 64 → 2
+    Architecture:
+    - Encoder: 1242 → 256 → 128 → 96 (latent representation)
+    - Decoder (reconstruction): 96 → 128 → 256 → 1242
+    - Classifier: 64 → 32 → 2
     
-    With many input features (1242), we use a deeper encoder to compress
-    the information effectively.
+    Losses:
+    - Reconstruction loss (MSE): measures how well we can reconstruct input
+    - Classification loss (CrossEntropy): measures prediction accuracy
     """
     
-    def __init__(self, input_dim=1242, latent_dim=64):
+    def __init__(self, input_dim=1242, latent_dim=128):
         super(AdvancedEncoderDecoder, self).__init__()
         
-        # ENCODER: Compress 1242 features to 64
-        # Need multiple layers to handle high-dimensional input
+        # ENCODER: Compress input to latent representation
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, 256),
             nn.BatchNorm1d(256),
@@ -254,66 +258,158 @@ class AdvancedEncoderDecoder(nn.Module):
             nn.ReLU()
         )
         
-        # DECODER: Predict from 64 compressed features
+        # DECODER: Reconstruct input from latent representation
         self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(128, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(256, input_dim)
+            # No activation here - we want raw reconstructed values
+        )
+        
+        # CLASSIFIER: Predict winner from latent representation
+        self.classifier = nn.Sequential(
             nn.Linear(latent_dim, 32),
             nn.BatchNorm1d(32),
             nn.ReLU(),
             nn.Dropout(0.2),
             nn.Linear(32, 2)
         )
-    
+
     def forward(self, x):
+        """
+        Forward pass returns both reconstruction and classification
+        
+        Returns:
+            tuple: (reconstructed_input, classification_logits)
+        """
+        # Encode to latent space
         latent = self.encoder(x)
-        output = self.decoder(latent)
-        return output
+        
+        # Reconstruct input
+        reconstructed = self.decoder(latent)
+        
+        # Classify from latent representation
+        classification = self.classifier(latent)
+        
+        return reconstructed, classification
+    
+    def encode(self, x):
+        """Get latent representation"""
+        return self.encoder(x)
+    
+    def decode(self, latent):
+        """Reconstruct from latent representation"""
+        return self.decoder(latent)
+    
+    def classify(self, x):
+        """Get classification only"""
+        latent = self.encoder(x)
+        return self.classifier(latent)
 
 
 # ============================================================================
 # TRAINING
 # ============================================================================
 
-def train_model(model, train_loader, val_loader, epochs):
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.0001, weight_decay=1e-4)
+def train_model(model, train_loader, val_loader, epochs, alpha=0.4):
+    """
+    Train with combined loss: alpha * reconstruction + (1-alpha) * classification
     
+    Args:
+        alpha: weight for reconstruction loss (0 to 1)
+               alpha=0.5 means equal weight to both losses
+               alpha=0.8 emphasizes reconstruction more
+               alpha=0.2 emphasizes classification more
+    """
+    criterion_recon = nn.MSELoss()
+    criterion_class = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, 
+        mode='max',           # 'max' because we want to maximize accuracy
+        factor=0.5,           # Reduce LR by half
+        patience=15,          # Wait 15 epochs without improvement
+        verbose=True,         # Print when LR changes
+        min_lr=1e-6          # Don't go below this LR
+    )    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     best_acc = 0
     
     for epoch in range(epochs):
         # Train
         model.train()
-        train_loss = 0
+        train_loss_recon = 0
+        train_loss_class = 0
+        train_loss_total = 0
+        
         for X_batch, y_batch in train_loader:
             X_batch, y_batch = X_batch.to(device), y_batch.to(device)
             
             optimizer.zero_grad()
-            outputs = model(X_batch)
-            loss = criterion(outputs, y_batch)
+            
+            # Forward pass - get both reconstruction and classification
+            reconstructed, classification = model(X_batch)
+            
+            # Compute both losses
+            loss_recon = criterion_recon(reconstructed, X_batch)
+            loss_class = criterion_class(classification, y_batch)
+            
+            # Combined loss
+            loss = alpha * loss_recon + (1 - alpha) * loss_class
+            
             loss.backward()
             optimizer.step()
-            train_loss += loss.item()
+            
+            train_loss_recon += loss_recon.item()
+            train_loss_class += loss_class.item()
+            train_loss_total += loss.item()
         
         # Validate
         model.eval()
         correct = 0
         total = 0
+        val_loss_recon = 0
+        val_loss_class = 0
+        
         with torch.no_grad():
             for X_batch, y_batch in val_loader:
                 X_batch, y_batch = X_batch.to(device), y_batch.to(device)
-                outputs = model(X_batch)
-                _, predicted = torch.max(outputs, 1)
+                
+                reconstructed, classification = model(X_batch)
+                
+                # Compute validation losses
+                val_loss_recon += criterion_recon(reconstructed, X_batch).item()
+                val_loss_class += criterion_class(classification, y_batch).item()
+                
+                # Compute accuracy
+                _, predicted = torch.max(classification, 1)
                 total += y_batch.size(0)
                 correct += (predicted == y_batch).sum().item()
         
         acc = 100 * correct / total
-        
+        scheduler.step(acc) 
+        # Save best model based on accuracy
         if acc > best_acc:
             best_acc = acc
             torch.save(model.state_dict(), './advanced_model.pth')
         
+        # Print progress
         if (epoch + 1) % 5 == 0:
-            print(f'Epoch {epoch+1}/{epochs} | Loss: {train_loss/len(train_loader):.4f} | Val Acc: {acc:.2f}%')
+            print(f'Epoch {epoch+1}/{epochs}')
+            print(f'  Train - Total: {train_loss_total/len(train_loader):.4f} | '
+                  f'Recon: {train_loss_recon/len(train_loader):.4f} | '
+                  f'Class: {train_loss_class/len(train_loader):.4f}')
+            print(f'  Val   - Recon: {val_loss_recon/len(val_loader):.4f} | '
+                  f'Class: {val_loss_class/len(val_loader):.4f} | '
+                  f'Acc: {acc:.2f}%')
     
+    # Load best model
     model.load_state_dict(torch.load('./advanced_model.pth'))
     print(f'\nBest Validation Accuracy: {best_acc:.2f}%')
     return model
@@ -323,65 +419,87 @@ def train_model(model, train_loader, val_loader, epochs):
 # MAIN
 # ============================================================================
 
-def main():
-    COMPETITION_NAME = 'fds-pokemon-battles-prediction-2025'
-    DATA_PATH = os.path.join('../input', COMPETITION_NAME)
-    
-    # Load data
-    print("Loading data...")
-    with open(os.path.join(DATA_PATH, 'train.jsonl'), 'r') as f:
-        train_battles = [json.loads(line) for line in f]
-    
-    with open(os.path.join(DATA_PATH, 'test.jsonl'), 'r') as f:
-        test_battles = [json.loads(line) for line in f]
-    
-    print(f"Train: {len(train_battles)} | Test: {len(test_battles)}")
-    
-    X_train = np.array([battle_to_full_features(b) for b in train_battles])
-    y_train = np.array([int(b['player_won']) for b in train_battles])
-    
-    
-    X_test = np.array([battle_to_full_features(b) for b in test_battles])
-    #Test data doesnt have label?
-    #y_test = np.array([int(b['player_won']) for b in test_battles])
-    test_ids = [b['battle_id'] for b in test_battles]
-    
-        # Split
-    X_tr, X_val, y_tr, y_val = train_test_split(X_train, y_train, test_size=0.2, random_state=42)
-    
-    # Create dataloaders
-    train_loader = DataLoader(BattleDataset(X_tr, y_tr), batch_size=64, shuffle=True)
-    val_loader = DataLoader(BattleDataset(X_val, y_val), batch_size=64)
-    test_loader = DataLoader(BattleDataset(X_test), batch_size=64)
-    
-    # Train
-    print("Training Advanced Encoder-Decoder with RAW timeline data...")
-    print("Architecture: Input(1242) → Encoder(256→128→64) → Decoder(32→2)\n")
-    
-    input_dim = X_train.shape[1]
-    epochs = 500
-    model = AdvancedEncoderDecoder(input_dim=input_dim, latent_dim=64).to(device)
-    model = train_model(model, train_loader, val_loader, epochs)
-    
-    # Predict
-    print("\nGenerating predictions...")
-    model.eval()
-    predictions = []
-    with torch.no_grad():
-        for X_batch in test_loader:
-            if isinstance(X_batch, tuple):
-                X_batch = X_batch[0]
-            X_batch = X_batch.to(device)
-            outputs = model(X_batch)
-            _, preds = torch.max(outputs, 1)
-            predictions.extend(preds.cpu().numpy())
-    # Save
-    submission = pd.DataFrame({
-        'battle_id': test_ids,
-        'player_won': predictions
-    })
-    submission.to_csv('./submission.csv', index=False)
-   
 
-if __name__ == "__main__":
-    main()
+
+COMPETITION_NAME = 'fds-pokemon-battles-prediction-2025'
+DATA_PATH = os.path.join('../input', COMPETITION_NAME)
+    
+# Load data
+print("Loading data...")
+with open(os.path.join(DATA_PATH, 'train.jsonl'), 'r') as f:
+    train_battles = [json.loads(line) for line in f]
+    
+with open(os.path.join(DATA_PATH, 'test.jsonl'), 'r') as f:
+    test_battles = [json.loads(line) for line in f]
+    
+print(f"Train: {len(train_battles)} | Test: {len(test_battles)}")
+    
+
+scaler = StandardScaler()
+X_train = np.array([battle_to_full_features(b) for b in train_battles])
+y_train = np.array([int(b['player_won']) for b in train_battles])
+    
+    
+X_test = np.array([battle_to_full_features(b) for b in test_battles])
+#Test data doesnt have label?
+#y_test = np.array([int(b['player_won']) for b in test_battles])
+test_ids = [b['battle_id'] for b in test_battles]
+    
+
+
+# Split
+X_train,X_test, y_train, y_test = train_test_split(X_train, y_train, test_size=0.5, random_state=42)
+X_val,X_test, y_val, y_test = train_test_split(X_test, y_test, test_size=0.5, random_state=42)
+
+#Normalize using only training 
+X_train = scaler.fit_transform(X_train)
+X_val = scaler.transform(X_val)
+X_test = scaler.transform(X_test)
+
+   
+# Create dataloaders
+train_loader = DataLoader(BattleDataset(X_train, y_train), batch_size=32, shuffle=True)
+val_loader = DataLoader(BattleDataset(X_val, y_val), batch_size=32)
+test_loader = DataLoader(BattleDataset(X_test, y_test), batch_size=32)
+    
+# Train
+print("Training Advanced Encoder-Decoder with RAW timeline data...")
+print("Architecture: Input(1242) → Encoder(256→128→96) → Decoder(32→2)\n")
+        
+input_dim = X_train.shape[1]
+epochs = 400
+alpha = 0.1
+    
+model = AdvancedEncoderDecoder(input_dim=input_dim, latent_dim=128).to(device)
+model = train_model(model, train_loader, val_loader, epochs, alpha=alpha)
+
+
+# Predict
+print("\nGenerating predictions...")
+model.eval()
+predictions = []
+accuracy = 0
+i=0
+with torch.no_grad():
+    for test_batch in test_loader:
+        if isinstance(test_batch, tuple):
+            X_batch = test_batch[0]
+            y_batch = test_batch[1]
+        X_batch = test_batch[0].to(device)
+        y_batch = test_batch[1].to(device)
+        outputs = model.forward(X_batch)
+        preds = torch.max(outputs[1], 1)
+        correct = torch.sum(preds[1] == y_batch).item()
+        accuracy += 100 * correct / len(y_batch)
+        predictions.extend(preds[1].cpu().numpy())
+        i += 1
+
+print('mean testing accuracy = ' + str(accuracy/i))
+"""
+# Save
+submission = pd.DataFrame({
+    'battle_id': test_ids,
+    'player_won': predictions
+})
+submission.to_csv('./submission.csv', index=False)
+"""
