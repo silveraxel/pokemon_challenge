@@ -233,9 +233,9 @@ class BattleDataset(Dataset):
         return x
 
 
-class SimpleClassifier(nn.Module):
+class SimpleNNClassifier(nn.Module):
     def __init__(self, input_dim):
-        super(SimpleClassifier, self).__init__()
+        super(SimpleNNClassifier, self).__init__()
 
         self.classifier = nn.Sequential(
             nn.Linear(input_dim, 256),   # Direct from input
@@ -260,6 +260,34 @@ class SimpleClassifier(nn.Module):
         return self.classifier(x)
 
 
+class SmallerNNClassifier(nn.Module):
+    def __init__(self, input_dim):
+        super(SmallerNNClassifier, self).__init__()
+
+        self.classifier = nn.Sequential(
+            nn.Linear(input_dim, 64),   # Direct from input
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            
+            nn.Linear(64, 32),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            
+            nn.Linear(32, 16),
+            nn.BatchNorm1d(16),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            
+            nn.Linear(16, 2)  # Output 2 classes
+        )
+    
+    def forward(self, x):
+        return self.classifier(x)
+
+
+
 
 
 # ============================================================================
@@ -269,7 +297,8 @@ class SimpleClassifier(nn.Module):
 def train_model(model, train_loader, val_loader, epochs):
     
     criterion_class = nn.CrossEntropyLoss(label_smoothing=0.01)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=1e-3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-3)
+    #optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=1e-3)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, 
         mode='max',           # 'max' because we want to maximize accuracy
@@ -389,10 +418,15 @@ for fold, (train_idx, val_idx) in enumerate(kfold.split(X, y)):
     X_val_fold = scaler.transform(X_val_fold)
    
 # Create dataloaders
-    train_loader = DataLoader(BattleDataset(X_train_fold, y_train_fold,training=True, noise_std=0.1), batch_size=32, shuffle=True)
-    val_loader = DataLoader(BattleDataset(X_val_fold, y_val_fold,training=False), batch_size=32)
+    train_loader = DataLoader(BattleDataset(X_train_fold, y_train_fold,training=True, noise_std=0.1), batch_size=16, shuffle=True)
+    val_loader = DataLoader(BattleDataset(X_val_fold, y_val_fold,training=False), batch_size=16)
 
-    model = SimpleClassifier(input_dim=input_dim).to(device)
+    #train_loader = DataLoader(BattleDataset(X_train_fold, y_train_fold,training=True, noise_std=0.1), batch_size=32, shuffle=True)
+    #val_loader = DataLoader(BattleDataset(X_val_fold, y_val_fold,training=False), batch_size=32)
+
+
+    model = SmallerNNClassifier(input_dim=input_dim).to(device)
+    #model = SimpleNNClassifier(input_dim=input_dim).to(device)
     model = train_model(model, train_loader, val_loader, epochs)
 #After the k-fold cross validation save the model
 # Predict
