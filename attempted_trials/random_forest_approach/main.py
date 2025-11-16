@@ -1,18 +1,16 @@
 import json
 import pandas as pd
-from tqdm.notebook import tqdm
 import os
 import numpy as np
-from sklearn.model_selection import train_test_split, RandomizedSearchCV, StratifiedKFold
+from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
 import logging
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import make_pipeline
 
 
-DATA_PATH = "."
+DATA_PATH = "../../input"
 TRAIN_FILE_PATH = os.path.join(DATA_PATH, 'train.jsonl')
 TEST_FILE_PATH = os.path.join(DATA_PATH, 'test.jsonl')
 TEST_SIZE = 0.3
