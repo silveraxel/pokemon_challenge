@@ -5,7 +5,7 @@ from libraries import *
 def main():
     # --- Define the path to our data ---
     COMPETITION_NAME = 'fds-pokemon-battles-prediction-2025'
-    DATA_PATH = os.path.join('../input', COMPETITION_NAME)
+    DATA_PATH = "input/"
     train_file_path = os.path.join(DATA_PATH, 'train.jsonl')
     test_file_path = os.path.join(DATA_PATH, 'test.jsonl')
 
@@ -163,8 +163,8 @@ def main():
     })
     submission_df.to_csv('submission_vecchio.csv', index=False)
     print("'submission_vecchio.csv' file created successfully!")
-    display(submission_df.head())
-    display(submission_df.nunique(axis=0))
+    print(submission_df.head())
+    print(submission_df.nunique(axis=0))
 
 
     # To get to our best model, we applied a gridsearch to find the best hyperparameter for the LogisticRegression of our previous model.
@@ -358,8 +358,8 @@ def main():
     submission_df.to_csv("submission.csv", index=False)
 
     print("File 'submission_cc.csv' file created successfully!")
-    display(submission_df.head())
-    display(submission_df.nunique(axis=0))
+    print(submission_df.head())
+    print(submission_df.nunique(axis=0))
 
 
     # Model of the submission submission_totti.csv with public score 0.8366. Here our idea was to reduce the gap of knowledge between the 2 teams using extract_all_tottipi() and the best hyperparameter but probably we added more noise than expected
@@ -463,8 +463,8 @@ def main():
     submission_df.to_csv('submission_totti.csv', index=False)
 
     print("\n✅ 'submission_totti.csv' file created successfully!")
-    display(submission_df.head())
-    display(submission_df.nunique(axis=0))
+    print(submission_df.head())
+    print(submission_df.nunique(axis=0))
 
 
 
